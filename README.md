@@ -30,9 +30,14 @@ print(scores)
 │ DataSource  │────▶│   Engine(s)  │────▶│  Portfolio   │
 │  (plugin)   │     │   (plugins)  │     │   Rule       │
 │ yfinance /  │     │ momentum /   │     │  (plugin)    │
-│ polygon /   │     │ quality /    │     │ equal weight │
-│ edgar / ... │     │ value / ...  │     │ score weight │
-└─────────────┘     └──────────────┘     └──────────────│
+│ edgar /     │     │ quality /    │     │ equal weight │
+│ finnhub /   │     │ value /      │     │ score weight │
+│ polygon /.. │     │ reversal /   │     └──────────────│
+│             │     │ technical /  │            │
+│             │     │ sentiment /  │            │
+│             │     │ fundamental /│            │
+│             │     │ text / ...   │            │
+└─────────────┘     └──────────────┘            │
        │                   │                    │
        └───────────────────┴────────────────────┘
                            │
@@ -43,6 +48,22 @@ print(scores)
                     │  blend / IC  │
                     └──────────────┘
 ```
+
+## Built-in Engines and Sources
+
+| Component | What it needs | Notes |
+|-----------|---------------|-------|
+| `MomentumEngine`, `ReversalEngine`, `TechnicalEngine` | `prices()` | work with any price source |
+| `QualityEngine`, `ValueEngine` | `fundamentals()` | any source with standard columns |
+| `FundamentalEngine` | `fundamentals()` with EDGAR-derived columns | pair with `EdgarSource` for PIT safety |
+| `SentimentEngine` | `alternative(kind="sentiment")` | pair with `FinnhubSource` (`pip install equitylens[finnhub]`) |
+| `TextEngine` | `alternative(kind="10k_mda")` + analyzer | `EdgarSource` + `equitylens[text]` (FinBERT); returns empty scores without them |
+| `EdgarSource` | — | `pip install equitylens[edgar]`; PIT-safe via SEC filing dates |
+| `FinnhubSource` | API key | rate-limited to 60 req/min; delegates `prices()`/`fundamentals()` to a wrapped source |
+
+Engines return empty scores (with a note in `metadata["error"]`) when their
+data isn't available, so a missing API key or optional extra never crashes a
+pipeline — the remaining engines still blend.
 
 ## Plugin Interfaces
 

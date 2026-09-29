@@ -22,13 +22,22 @@ dev = [
     "ruff>=0.5",
 ]
 plugins = [
-    "finnhub>=0.2",
     "polygon-api-client>=1.14",
+]
+edgar = [
+    "requests>=2.31",
+]
+finnhub = [
+    "requests>=2.31",
+]
+text = [
+    "transformers>=4.40",
+    "torch>=2.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/equitylens-framework"
-Issues = "https://github.com/yourusername/equitylens-framework/issues"
+Homepage = "https://github.com/ShuoLi/equitylens-framework"
+Issues = "https://github.com/ShuoLi/equitylens-framework/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/equitylens"]
