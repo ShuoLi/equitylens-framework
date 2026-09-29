@@ -1,18 +1,46 @@
 # EquityLens Framework
 
-Pluggable multi-factor equity research. Bring your own data source, signal engines, and portfolio rules — the framework handles orchestration, caching, point-in-time correctness, and attribution.
+**Pluggable multi-factor equity research.** Bring your own data sources, signal
+engines, and portfolio rules — the framework handles orchestration, caching,
+point-in-time correctness, and attribution.
 
-## Quick Start
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
+
+Most quant research code rots the same way: hardcoded API calls, silent
+look-ahead bias, and monoliths you can't test. This framework is built to
+prevent exactly that. It was extracted from a working 7-engine research
+application (S&P 1000 scoring, SEC filing parsing, FinBERT 10-K sentiment)
+and rebuilt around three protocols — `DataSource`, `Engine`, `PortfolioRule`
+— with correctness enforced at the interface level rather than by convention.
+
+## Design principles
+
+1. **Point-in-time by default** — every data interface accepts `as_of`;
+   implementations must respect it. `EdgarSource` filters every metric by SEC
+   filing date with a 45-day observability lag, so backtests can't see filings
+   that didn't exist yet.
+2. **Inject, don't import** — engines receive a `DataSource` and never call
+   yfinance/EDGAR/Finnhub directly. Swap data vendors without touching a signal.
+3. **Stateless engines** — config in `__init__`, no mutation during `compute()`.
+4. **Confidence-aware** — every engine reports per-ticker data quality, and the
+   pipeline can gate on it. A missing dataset yields *no* score, never a fake
+   neutral one.
+5. **Attribution-friendly** — intermediate metrics are preserved in every
+   `EngineOutput`, so you can always answer "why did this stock score high?"
+
+## Quick start
 
 ```bash
-pip install equitylens
+git clone https://github.com/ShuoLi/equitylens-framework.git
+cd equitylens-framework
+pip install -e .
 ```
 
 ```python
 from equitylens import Pipeline
 from equitylens.data_sources import YFinanceSource
 from equitylens.engines import MomentumEngine, QualityEngine, ValueEngine
-from equitylens.portfolio import EqualWeightTopN
 
 pipeline = Pipeline(YFinanceSource())
 pipeline.register(MomentumEngine(lookback_days=126), weight=0.30)
@@ -23,6 +51,9 @@ scores = pipeline.run(["AAPL", "MSFT", "NVDA", "GOOGL"], as_of="2025-09-18")
 print(scores)
 ```
 
+More complete examples — including backtesting with turnover-aware rules and a
+custom alternative-data engine — live in [`examples/`](examples/).
+
 ## Architecture
 
 ```
@@ -32,9 +63,9 @@ print(scores)
 │ yfinance /  │     │ momentum /   │     │  (plugin)    │
 │ edgar /     │     │ quality /    │     │ equal weight │
 │ finnhub /   │     │ value /      │     │ score weight │
-│ polygon /.. │     │ reversal /   │     └──────────────│
-│             │     │ technical /  │            │
-│             │     │ sentiment /  │            │
+│ polygon /.. │     │ reversal /   │     │ turnover-    │
+│             │     │ technical /  │     │ aware        │
+│             │     │ sentiment /  │     └──────────────┘
 │             │     │ fundamental /│            │
 │             │     │ text / ...   │            │
 └─────────────┘     └──────────────┘            │
@@ -49,70 +80,61 @@ print(scores)
                     └──────────────┘
 ```
 
-## Built-in Engines and Sources
+## Built-in engines
 
-| Component | What it needs | Notes |
-|-----------|---------------|-------|
-| `MomentumEngine`, `ReversalEngine`, `TechnicalEngine` | `prices()` | work with any price source |
-| `QualityEngine`, `ValueEngine` | `fundamentals()` | any source with standard columns |
-| `FundamentalEngine` | `fundamentals()` with EDGAR-derived columns | pair with `EdgarSource` for PIT safety |
-| `SentimentEngine` | `alternative(kind="sentiment")` | pair with `FinnhubSource` (`pip install equitylens[finnhub]`) |
-| `TextEngine` | `alternative(kind="10k_mda")` + analyzer | `EdgarSource` + `equitylens[text]` (FinBERT); returns empty scores without them |
-| `EdgarSource` | — | `pip install equitylens[edgar]`; PIT-safe via SEC filing dates |
-| `FinnhubSource` | API key | rate-limited to 60 req/min; delegates `prices()`/`fundamentals()` to a wrapped source |
+Eight engines, all stateless, all returning `EngineOutput(scores, raw_metrics,
+confidence, metadata)`:
 
-Engines return empty scores (with a note in `metadata["error"]`) when their
-data isn't available, so a missing API key or optional extra never crashes a
-pipeline — the remaining engines still blend.
+| Engine | Signal family | Needs |
+|--------|---------------|-------|
+| `MomentumEngine` | Risk-adjusted momentum with skip-days (crash avoidance) | `prices()` |
+| `ReversalEngine` | Vol-normalized 1W/1M mean reversion (offsets momentum) | `prices()` |
+| `TechnicalEngine` | MA structure, Bollinger %B, OBV/volume confirmation, relative strength | `prices()` |
+| `QualityEngine` | ROE, margins, growth, leverage | `fundamentals()` |
+| `ValueEngine` | Forward P/E, PEG, P/S, P/B with outlier caps | `fundamentals()` |
+| `FundamentalEngine` | EDGAR deep-dive: ROIC, accruals, Piotroski F, margin stability | EDGAR-derived fundamentals |
+| `SentimentEngine` | Analyst consensus, upgrade/downgrade momentum, earnings surprises, insider flow | `alternative("sentiment")` |
+| `TextEngine` | FinBERT 10-K MD&A sentiment + year-over-year tone shift | `alternative("10k_mda")` + `[text]` extra |
 
-## Plugin Interfaces
+Every engine degrades gracefully: if its data isn't available (missing API key,
+optional extra not installed), it returns empty scores with a note in
+`metadata["error"]` and the remaining engines still blend. One broken
+dependency never crashes a pipeline.
 
-### DataSource
+## Built-in data sources
 
-```python
-from equitylens import DataSource
+| Source | prices | fundamentals | alternative | PIT status |
+|--------|--------|--------------|-------------|------------|
+| `YFinanceSource` | ✓ | ✓ | — | Prices ✓; fundamentals **not** (latest filings only) |
+| `EdgarSource` | delegates | ✓ filing-date filtered | 10-K MD&A + risk factors | **Yes** — 45-day lag after filing |
+| `FinnhubSource` | delegates | delegates | analyst / earnings / insider | Historical rows filtered to ≤ `as_of`; consensus targets are live-only |
 
-class MyDataSource(DataSource):
-    def prices(self, tickers, start, end):
-        return pd.DataFrame(...)  # date, ticker, open, high, low, close, volume, adj_close
+Install optional dependencies per source:
 
-    def fundamentals(self, tickers, as_of=None):
-        return pd.DataFrame(...)  # one row per ticker, PIT-safe if as_of given
-
-    def alternative(self, tickers, kind, as_of=None):
-        return None  # optional
+```bash
+pip install -e ".[edgar]"     # SEC EDGAR fundamentals + 10-K text
+pip install -e ".[finnhub]"   # analyst/earnings/insider data
+pip install -e ".[text]"      # FinBERT (transformers + torch)
 ```
 
-### Engine
+## Blending and confidence gating
+
+Engines blend by fixed weights or by their historical Information Coefficient,
+and can be skipped when data quality is too low:
 
 ```python
-from equitylens import Engine, EngineOutput
+pipeline.register(MomentumEngine(), weight=0.30, min_confidence=0.6)
 
-class MyEngine(Engine):
-    name = "my_signal"
+# Record IC observations as you accumulate them
+pipeline.record_ic("momentum", ic_value=0.04, date="2025-09-12")
 
-    def compute(self, data, universe, as_of):
-        px = data.prices(universe, start="2025-01-01", end=as_of)
-        # ... compute signal ...
-        return EngineOutput(
-            scores=pd.Series({...}),
-            raw_metrics=pd.DataFrame({...}),
-            confidence=pd.Series({...}),
-            metadata={"version": "1.0"},
-        )
-```
-
-### PortfolioRule
-
-```python
-from equitylens import PortfolioRule
-
-class MyRule(PortfolioRule):
-    def target_weights(self, scores, prices, current_weights):
-        return pd.Series({...})  # weights sum to ~1.0
+scores = pipeline.run(universe, as_of="2025-09-18", blend_method="ic_weighted")
 ```
 
 ## Backtesting
+
+Walk-forward simulation with transaction costs, reusing the same pipeline —
+so a backtest scores exactly what live scoring would:
 
 ```python
 from equitylens.backtest import BacktestEngine
@@ -124,28 +146,48 @@ bt = BacktestEngine(
     rebalance_freq="W",
     transaction_cost_bps=10,
 )
-
 result = bt.run(universe, start="2024-01-01", end="2025-09-01")
 print(result.stats)
 ```
 
-## Point-in-Time Correctness
+## Writing plugins
 
-The framework enforces PIT at the `DataSource` interface level. When `as_of` is passed to `fundamentals()` or `prices()`, implementations must only return data that was public knowledge on that date.
+Any `DataSource`, `Engine`, or `PortfolioRule` that satisfies the protocol
+drops straight into the pipeline — and can be distributed as a pip package
+with entry points for auto-discovery. Full guide with worked examples (Polygon
+source, earnings-surprise engine, risk-parity rule): [`docs/PLUGINS.md`](docs/PLUGINS.md).
 
-- `YFinanceSource` is **NOT** PIT-safe for fundamentals (returns latest filings).
-- For PIT-correct backtests, use a source that tracks filing dates: SEC EDGAR, Polygon, SimFin, etc.
+Architecture details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-## IC-Weighted Blending
+## Honest limitations
 
-```python
-# Record IC observations as you get them
-pipeline.record_ic("momentum", ic_value=0.04, date="2025-09-12")
-pipeline.record_ic("quality", ic_value=0.06, date="2025-09-12")
+- `YFinanceSource` fundamentals have look-ahead bias in backtests (it returns
+  the latest filing regardless of `as_of`). For PIT-correct fundamentals, use
+  `EdgarSource` — that's why it exists.
+- Finnhub free-tier consensus price targets are a current snapshot; treat them
+  as live-only, not backtest-safe.
+- Universe membership is the caller's responsibility — survivorship-free
+  point-in-time index membership is on the roadmap.
+- No regime detection yet (the research app this was extracted from used an
+  HMM macro layer; porting it is on the roadmap).
 
-# Blend by IC instead of fixed weights
-scores = pipeline.run(universe, as_of="2025-09-18", blend_method="ic_weighted")
+## Roadmap
+
+- Regime-conditional engine weights (HMM macro layer)
+- HRP / style-factor-neutral portfolio construction rules
+- Point-in-time universe membership (survivorship bias)
+- CI pipeline with coverage reporting
+
+## Testing
+
+```bash
+pip install -e ".[dev]"
+python -m pytest tests/        # 22 tests, no network access required
 ```
+
+Tests cover every engine against synthetic data with known orderings, plus the
+point-in-time machinery itself — including a test that a filing too new for
+`as_of` cannot leak into derived metrics.
 
 ## License
 
